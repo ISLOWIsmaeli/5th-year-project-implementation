@@ -1,7 +1,6 @@
 #include <driver/i2s.h>
-#include <math.h>
 
-// Pins & Config
+// Pins & Config (same as before)
 #define PRIMARY_SCK 14
 #define PRIMARY_WS 15
 #define PRIMARY_SD 32
@@ -10,16 +9,8 @@
 #define SECONDARY_WS 2
 #define SECONDARY_SD 33
 
-// ANC Parameters
-#define FILTER_TAPS 32    // Number of filter coefficients (tradeoff between performance and computation)
-#define MU 0.01f         // Learning rate (critical for stability)
-
-// LMS Filter Variables
-float w[FILTER_TAPS] = {0};  // Adaptive filter coefficients
-float x_history[FILTER_TAPS] = {0};  // History of reference samples
-
 // Serial Plotter Settings
-const int PLOT_SAMPLE_INTERVAL = 10;
+const int PLOT_SAMPLE_INTERVAL = 10;  // Send 1 in every N samples (downsampling)
 unsigned long lastPlotTime = 0;
 
 void setup() {
@@ -70,67 +61,36 @@ void setup() {
   i2s_set_pin(I2S_NUM_1, &secondary_pins);
 }
 
-// LMS Adaptive Filter Implementation
-float lms_filter(float primary, float reference) {
-  static int index = 0;
-  
-  // Update reference sample history
-  x_history[index] = reference;
-  
-  // Calculate filter output (noise estimate)
-  float noise_estimate = 0;
-  for (int i = 0; i < FILTER_TAPS; i++) {
-    int j = (index + i) % FILTER_TAPS;
-    noise_estimate += w[i] * x_history[j];
-  }
-  
-  // Calculate error (desired signal)
-  float error = primary - noise_estimate;
-  
-  // Update filter coefficients
-  for (int i = 0; i < FILTER_TAPS; i++) {
-    int j = (index + i) % FILTER_TAPS;
-    w[i] += MU * error * x_history[j];
-  }
-  
-  index = (index + 1) % FILTER_TAPS;
-  return error; // Return cleaned signal
-}
-
 void loop() {
   int16_t mic1_samples[256];
   int16_t mic2_samples[256];
   size_t bytes_read1, bytes_read2;
 
-  // 1. Read audio data
+  // 1. Read audio data (real-time critical)
   i2s_read(I2S_NUM_0, mic1_samples, sizeof(mic1_samples), &bytes_read1, portMAX_DELAY);
   i2s_read(I2S_NUM_1, mic2_samples, sizeof(mic2_samples), &bytes_read2, portMAX_DELAY);
 
-  int sample_count = min(bytes_read1, bytes_read2) / sizeof(int16_t);
-  
-  // 2. Process samples with ANC
-  for(int i = 0; i < sample_count; i++) {
-    // Convert to float for processing (-1.0 to 1.0 range)
-    float primary = mic1_samples[i] / 32768.0f;
-    float reference = mic2_samples[i] / 32768.0f;
-    
-    // Apply adaptive noise cancellation
-    float cleaned = lms_filter(primary, reference);
-    
-    // Apply gain and convert back to int16
-    mic1_samples[i] = constrain((int16_t)(cleaned * 32767.0f * 2.0), -32768, 32767);
-    
-    // Optional: Send to Serial Plotter
-    if (millis() - lastPlotTime > 10 && i == 0) {
-      lastPlotTime = millis();
-      Serial.print("Raw:");
-      Serial.print(mic1_samples[i]);
-      Serial.print(",Cleaned:");
-      Serial.println((int16_t)(cleaned * 32767.0f));
-    }
+  // 2. Serial Plotter (non-blocking, downsampled)
+  if (millis() - lastPlotTime > 10) {  // Update every ~10ms (~100Hz)
+    lastPlotTime = millis();
+    int sample_to_plot = 0;  // Plot the first sample (or pick a middle one)
+    Serial.print("Mic1:");
+    Serial.print(mic1_samples[sample_to_plot]);
+    Serial.print(",Mic2:");
+    Serial.println(mic2_samples[sample_to_plot]);
   }
 
-  // 3. Output processed audio
+  // 3. Process audio (mixing + gain)
+  int sample_count = min(bytes_read1, bytes_read2) / sizeof(int16_t);
+  for(int i = 0; i < sample_count; i++) {
+    int32_t mixed = ((mic1_samples[i] + mic2_samples[i]) * 6) / 2;
+    mic1_samples[i] = constrain(mixed, -32768, 32767);
+  }
+
+  // 4. Output audio (non-blocking)
   size_t bytes_written;
   i2s_write(I2S_NUM_0, mic1_samples, bytes_read1, &bytes_written, portMAX_DELAY);
+
+  
+  
 }
