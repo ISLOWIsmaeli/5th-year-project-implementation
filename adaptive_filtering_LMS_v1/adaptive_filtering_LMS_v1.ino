@@ -118,9 +118,8 @@ void loop() {
     float cleaned = lms_filter(primary, reference);
     
     // Apply gain and convert back to int16
-//    mic1_samples[i] = constrain((int16_t)(cleaned * 32767.0f * 2.0), -32768, 32767);
-    // Soft clipping using tanh (alternative to constrain)
-    mic1_samples[i] = (int16_t)(32767.0f * tanh(cleaned));
+    mic1_samples[i] = constrain((int16_t)(cleaned * 32767.0f * 2.0), -32768, 32767);
+    
     
     // Optional: Send to Serial Plotter
     if (millis() - lastPlotTime > 10 && i == 0) {
@@ -130,7 +129,10 @@ void loop() {
       Serial.print(",Cleaned:");
       Serial.println((int16_t)(cleaned * 32767.0f));
     }
+    // Soft clipping using tanh (alternative to constrain)
+    mic1_samples[i] = (int16_t)(32767.0f * tanh(cleaned));
   }
+  
 
   // 3. Output processed audio
   size_t bytes_written;
