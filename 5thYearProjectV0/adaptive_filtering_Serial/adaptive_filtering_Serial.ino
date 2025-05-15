@@ -86,24 +86,19 @@ float calculate_rmse() {
 
 float lms_filter(float primary, float reference) {
   static int index = 0;
-  
   x_history[index] = reference;
-  
   float noise_estimate = 0;
   for (int i = 0; i < FILTER_TAPS; i++) {
     int j = (index + i) % FILTER_TAPS;
     noise_estimate += w[i] * x_history[j];
   }
-  
   float error = primary - noise_estimate;
   error_buffer[error_index] = error;
   error_index = (error_index + 1) % RMSE_WINDOW;
-  
   for (int i = 0; i < FILTER_TAPS; i++) {
     int j = (index + i) % FILTER_TAPS;
     w[i] += MU * error * x_history[j];
   }
-  
   index = (index + 1) % FILTER_TAPS;
   return error;
 }
@@ -124,7 +119,7 @@ void loop() {
     
     float cleaned = lms_filter(primary, reference);
     iterationCount++;
-    
+    // mic1_samples[i] = constrain(cleaned,-32767.0f,+32767.0f);
     mic1_samples[i] = (int16_t)(32767.0f * tanh(cleaned));
   }
 
@@ -138,7 +133,6 @@ void loop() {
     Serial.print(iterationCount);
     Serial.print(",");
     Serial.println(current_rmse, 6); // 6 decimal places
-    
     lastSerialOutput = millis();
   }
    size_t bytes_written;
