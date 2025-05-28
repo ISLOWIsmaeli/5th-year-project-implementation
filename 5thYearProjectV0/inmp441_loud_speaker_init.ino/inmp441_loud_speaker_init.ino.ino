@@ -1,5 +1,5 @@
 #include <driver/i2s.h>
-
+#include <math.h>
 #define I2S_SCK 14
 #define I2S_WS 15
 #define I2S_SD 32  // Mic data
@@ -52,6 +52,7 @@ void loop() {
     
     // Prevent clipping (hard limit to 16-bit range)
     raw_samples[i] = constrain(boosted, -32768, 32767);
+//    raw_samples[i] = (int16_t)(32767.0f * tanh(boosted));
   }
 
   // 3. Send to amplifier
