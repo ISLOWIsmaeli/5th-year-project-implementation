@@ -16,7 +16,7 @@ int16_t i2s_Buffer[buffer_Len];
 //
 #define I2S_WS_AMP 21
 #define I2S_SD_AMP 22
-#define I2S_SCK_AMP 23
+#define I2S_SCK_AMP 23 
 #define I2S_PORT0 I2S_NUM_0             // I2S0
 #define I2S_PORT1 I2S_NUM_1             // I2S1
 //
@@ -91,23 +91,23 @@ void setup() {
 // send the captured data to the amplifier and then to the
 // speaker
 //
-//void loop(){
-//  bytesIn = 0;
-//  bytes_read = i2s_read(I2S_PORT0,&i2s_Buffer,buffer_Len,&bytesIn,portMAX_DELAY);
-//  if(bytesIn > 0)
-//  {
-//    i2s_write(I2S_PORT1,&i2s_Buffer,bytesIn,&bytesWritten,portMAX_DELAY); 
-//  }
-//}
-
-// to amplify the output by a scale factor of 3
-void loop() {
-   bytesIn = 0;
-   bytes_read = i2s_read(I2S_PORT0,&i2s_Buffer,buffer_Len,&bytesIn,portMAX_DELAY);
-   if(bytesIn > 0){
-      for(int i=0; i < bytesIn; i++){
-        i2s_Buffer[i]=3*i2s_Buffer[i];
-       }
-      i2s_write(I2S_PORT1,&i2s_Buffer,bytesIn,&bytesWritten,portMAX_DELAY); 
+void loop(){
+  bytesIn = 0;
+  bytes_read = i2s_read(I2S_PORT0,&i2s_Buffer,buffer_Len,&bytesIn,portMAX_DELAY);
+  if(bytesIn > 0)
+  {
+    i2s_write(I2S_PORT1,&i2s_Buffer,bytesIn,&bytesWritten,portMAX_DELAY); 
   }
 }
+
+// to amplify the output by a scale factor of 3
+//void loop() {
+//   bytesIn = 0;
+//   bytes_read = i2s_read(I2S_PORT0,&i2s_Buffer,buffer_Len,&bytesIn,portMAX_DELAY);
+//   if(bytesIn > 0){
+//      for(int i=0; i < bytesIn; i++){
+//        i2s_Buffer[i]=3*i2s_Buffer[i];
+//       }
+//      i2s_write(I2S_PORT1,&i2s_Buffer,bytesIn,&bytesWritten,portMAX_DELAY); 
+//  }
+//}
