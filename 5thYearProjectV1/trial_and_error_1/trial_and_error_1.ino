@@ -1,259 +1,146 @@
 #include <driver/i2s.h>
-#include <math.h>
-#include <SD.h>
-#include <SPI.h>
 
-// I2S pins
-#define I2S_SCK 14
-#define I2S_WS 15
-#define I2S_SD 32  // Mic data
-#define I2S_DOUT 25 // Amp data
+// Primary I2S Bus (Mic1 + Amp)
+#define PRIMARY_SCK 14
+#define PRIMARY_WS 15
+#define PRIMARY_SD 32
+#define AMP_DOUT 22
 
-// SD Card pins (adjust based on your wiring)
-#define SD_CS 5
-#define SD_MOSI 23
-#define SD_MISO 19
-#define SD_SCK 18
+// Secondary I2S Bus (Mic2)
+#define SECONDARY_SCK 26
+#define SECONDARY_WS 25
+#define SECONDARY_SD 35
 
-// Recording parameters
-#define SAMPLE_RATE 44100
-#define RECORD_TIME 30  // seconds
-#define BUFFER_SIZE 512
-#define TOTAL_SAMPLES (SAMPLE_RATE * RECORD_TIME)
-
-// File name for recorded audio
-const char* filename = "/recording.wav";
-
-// State variables
-enum State {
-  RECORDING,
-  WAITING,
-  PLAYING,
-  IDLE
-};
-
-State currentState = RECORDING;
-unsigned long stateStartTime = 0;
-File audioFile;
-int32_t samplesRecorded = 0;
+// Buffer size - reduced for lower latency
+#define SAMPLE_BUFFER_SIZE 128
+#define BYTES_TO_READ (SAMPLE_BUFFER_SIZE * sizeof(int16_t))
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Starting Audio Recording System...");
   
-  // Initialize SD card
-  if (!SD.begin(SD_CS)) {
-    Serial.println("SD Card initialization failed!");
-    return;
-  }
-  Serial.println("SD Card initialized successfully");
-  
-  // I2S Configuration
-  i2s_config_t i2s_config = {
+  // Primary I2S Config (TX to amp + RX from mic1)
+  i2s_config_t primary_config = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_TX),
-    .sample_rate = SAMPLE_RATE,
+    .sample_rate = 44100,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 4,
-    .dma_buf_len = BUFFER_SIZE,
-    .use_apll = true
+    .dma_buf_count = 8,        // Increased buffer count
+    .dma_buf_len = 256,        // Reduced buffer length for lower latency
+    .use_apll = true,
+    .tx_desc_auto_clear = true // Clear TX descriptor automatically
   };
   
-  i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+  i2s_driver_install(I2S_NUM_0, &primary_config, 0, NULL);
   
-  // Pin configuration
-  i2s_pin_config_t pin_config = {
-    .bck_io_num = I2S_SCK,
-    .ws_io_num = I2S_WS,
-    .data_out_num = I2S_DOUT,
-    .data_in_num = I2S_SD
+  // Primary pin config
+  i2s_pin_config_t primary_pins = {
+    .bck_io_num = PRIMARY_SCK,
+    .ws_io_num = PRIMARY_WS,
+    .data_out_num = AMP_DOUT,
+    .data_in_num = PRIMARY_SD
   };
-  i2s_set_pin(I2S_NUM_0, &pin_config);
+  i2s_set_pin(I2S_NUM_0, &primary_pins);
   
-  // Start recording immediately
-  startRecording();
-  stateStartTime = millis();
-  Serial.println("Recording started...");
+  // Secondary I2S Config (RX from mic2 only)
+  i2s_config_t secondary_config = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
+    .sample_rate = 44100,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,        // Increased buffer count
+    .dma_buf_len = 256,        // Consistent with primary
+    .use_apll = true           // Changed to true for better sync
+  };
+  
+  i2s_driver_install(I2S_NUM_1, &secondary_config, 0, NULL);
+  
+  // Secondary pin config
+  i2s_pin_config_t secondary_pins = {
+    .bck_io_num = SECONDARY_SCK,
+    .ws_io_num = SECONDARY_WS,
+    .data_out_num = I2S_PIN_NO_CHANGE,
+    .data_in_num = SECONDARY_SD,
+  };
+  i2s_set_pin(I2S_NUM_1, &secondary_pins);
+  
+  // Clear any existing data in the I2S buffers
+  i2s_zero_dma_buffer(I2S_NUM_0);
+  i2s_zero_dma_buffer(I2S_NUM_1);
+  
+  // Start both I2S peripherals
+  i2s_start(I2S_NUM_0);
+  i2s_start(I2S_NUM_1);
+  
+  Serial.println("I2S initialized successfully");
 }
 
 void loop() {
-  switch(currentState) {
-    case RECORDING:
-      handleRecording();
-      break;
-    case WAITING:
-      handleWaiting();
-      break;
-    case PLAYING:
-      handlePlayback();
-      break;
-    case IDLE:
-      // Do nothing - process complete
-      break;
-  }
-}
-
-void startRecording() {
-  // Remove existing file if it exists
-  if (SD.exists(filename)) {
-    SD.remove(filename);
-  }
+  int16_t mic1_samples[SAMPLE_BUFFER_SIZE];
+  int16_t mic2_samples[SAMPLE_BUFFER_SIZE];
+  size_t bytes_read1, bytes_read2;
   
-  // Create new file for recording
-  audioFile = SD.open(filename, FILE_WRITE);
-  if (!audioFile) {
-    Serial.println("Failed to create recording file!");
+  // Clear buffers before reading
+  memset(mic1_samples, 0, sizeof(mic1_samples));
+  memset(mic2_samples, 0, sizeof(mic2_samples));
+  
+  // Read from both mics with timeout
+  esp_err_t err1 = i2s_read(I2S_NUM_0, mic1_samples, BYTES_TO_READ, &bytes_read1, pdMS_TO_TICKS(10));
+  esp_err_t err2 = i2s_read(I2S_NUM_1, mic2_samples, BYTES_TO_READ, &bytes_read2, pdMS_TO_TICKS(10));
+  
+  if (err1 != ESP_OK || err2 != ESP_OK) {
+    Serial.printf("Read error: mic1=%d, mic2=%d\n", err1, err2);
     return;
   }
   
-  // Write WAV header (we'll update it later with correct size)
-  writeWAVHeader(audioFile, TOTAL_SAMPLES);
-  samplesRecorded = 0;
-}
-
-void handleRecording() {
-  int16_t raw_samples[BUFFER_SIZE];
-  size_t bytes_read;
-  
-  // Read from microphone
-  i2s_read(I2S_NUM_0, raw_samples, sizeof(raw_samples), &bytes_read, portMAX_DELAY);
-  
-  int samples_count = bytes_read / sizeof(int16_t);
-  
-  // Write samples to SD card
-  if (audioFile && samplesRecorded < TOTAL_SAMPLES) {
-    int samplesToWrite = min(samples_count, (int)(TOTAL_SAMPLES - samplesRecorded));
-    audioFile.write((uint8_t*)raw_samples, samplesToWrite * sizeof(int16_t));
-    samplesRecorded += samplesToWrite;
-    
-    // Print progress every 5 seconds
-    if (samplesRecorded % (SAMPLE_RATE * 5) == 0) {
-      Serial.print("Recording progress: ");
-      Serial.print(samplesRecorded / SAMPLE_RATE);
-      Serial.println(" seconds");
-    }
-  }
-  
-  // Check if recording time is complete
-  if (samplesRecorded >= TOTAL_SAMPLES) {
-    stopRecording();
-    currentState = WAITING;
-    stateStartTime = millis();
-    Serial.println("Recording complete! Waiting 5 seconds...");
-  }
-}
-
-void stopRecording() {
-  if (audioFile) {
-    // Update WAV header with actual recorded samples
-    updateWAVHeader(audioFile, samplesRecorded);
-    audioFile.close();
-    Serial.print("Recording saved: ");
-    Serial.print(samplesRecorded / SAMPLE_RATE);
-    Serial.println(" seconds");
-  }
-}
-
-void handleWaiting() {
-  // Wait for 5 seconds
-  if (millis() - stateStartTime >= 5000) {
-    currentState = PLAYING;
-    stateStartTime = millis();
-    Serial.println("Starting playback...");
-    startPlayback();
-  }
-}
-
-void startPlayback() {
-  audioFile = SD.open(filename, FILE_READ);
-  if (!audioFile) {
-    Serial.println("Failed to open recording file for playback!");
-    currentState = IDLE;
+  // Ensure we have valid data
+  if (bytes_read1 == 0 || bytes_read2 == 0) {
+    Serial.println("No data read from microphones");
     return;
   }
   
-  // Skip WAV header (44 bytes)
-  audioFile.seek(44);
-}
-
-void handlePlayback() {
-  if (!audioFile || !audioFile.available()) {
-    // Playback complete
-    if (audioFile) {
-      audioFile.close();
-    }
-    currentState = IDLE;
-    Serial.println("Playback complete!");
+  // Calculate actual sample count
+  int sample_count1 = bytes_read1 / sizeof(int16_t);
+  int sample_count2 = bytes_read2 / sizeof(int16_t);
+  int sample_count = min(sample_count1, sample_count2);
+  
+  if (sample_count <= 0) {
     return;
   }
   
-  int16_t playback_samples[BUFFER_SIZE];
-  size_t bytes_to_read = sizeof(playback_samples);
-  size_t bytes_available = audioFile.available();
-  
-  if (bytes_available < bytes_to_read) {
-    bytes_to_read = bytes_available;
+  // Mix samples with proper scaling and overflow protection
+  for(int i = 0; i < sample_count; i++) {
+    // Convert to 32-bit for calculation
+    int32_t sample1 = mic1_samples[i];
+    int32_t sample2 = mic2_samples[i];
+    
+    // Simple average mixing
+    int32_t mixed = (sample1 + sample2) / 2;
+    
+    // Clamp to 16-bit range
+    if (mixed > 32767) mixed = 32767;
+    if (mixed < -32768) mixed = -32768;
+    
+    mic1_samples[i] = (int16_t)mixed;
   }
   
-  size_t bytes_read = audioFile.read((uint8_t*)playback_samples, bytes_to_read);
+  // Output mixed audio - use actual bytes read for consistency
+  size_t bytes_to_write = sample_count * sizeof(int16_t);
+  size_t bytes_written;
   
-  if (bytes_read > 0) {
-    int samples_count = bytes_read / sizeof(int16_t);
-    
-    // Apply volume boost for playback
-    for(int i = 0; i < samples_count; i++) {
-      int32_t boosted = playback_samples[i] * 3;
-      playback_samples[i] = constrain(boosted, -32768, 32767);
-    }
-    
-    // Send to amplifier
-    size_t bytes_written;
-    i2s_write(I2S_NUM_0, playback_samples, bytes_read, &bytes_written, portMAX_DELAY);
+  esp_err_t write_err = i2s_write(I2S_NUM_0, mic1_samples, bytes_to_write, &bytes_written, pdMS_TO_TICKS(10));
+  
+  if (write_err != ESP_OK) {
+    Serial.printf("Write error: %d\n", write_err);
   }
-}
-
-void writeWAVHeader(File file, uint32_t sampleCount) {
-  uint32_t fileSize = 44 + (sampleCount * 2) - 8;  // Total file size - 8
-  uint32_t dataSize = sampleCount * 2;  // Data chunk size
   
-  // RIFF header
-  file.write((const uint8_t*)"RIFF", 4);
-  file.write((uint8_t*)&fileSize, 4);
-  file.write((const uint8_t*)"WAVE", 4);
-  
-  // Format chunk
-  file.write((const uint8_t*)"fmt ", 4);
-  uint32_t fmtSize = 16;
-  file.write((uint8_t*)&fmtSize, 4);
-  uint16_t audioFormat = 1;  // PCM
-  file.write((uint8_t*)&audioFormat, 2);
-  uint16_t numChannels = 1;  // Mono
-  file.write((uint8_t*)&numChannels, 2);
-  uint32_t sampleRate = SAMPLE_RATE;
-  file.write((uint8_t*)&sampleRate, 4);
-  uint32_t byteRate = SAMPLE_RATE * 2;  // Sample rate * channels * bytes per sample
-  file.write((uint8_t*)&byteRate, 4);
-  uint16_t blockAlign = 2;  // Channels * bytes per sample
-  file.write((uint8_t*)&blockAlign, 2);
-  uint16_t bitsPerSample = 16;
-  file.write((uint8_t*)&bitsPerSample, 2);
-  
-  // Data chunk header
-  file.write((const uint8_t*)"data", 4);
-  file.write((uint8_t*)&dataSize, 4);
-}
-
-void updateWAVHeader(File file, uint32_t actualSampleCount) {
-  uint32_t fileSize = 44 + (actualSampleCount * 2) - 8;
-  uint32_t dataSize = actualSampleCount * 2;
-  
-  // Update file size in RIFF header
-  file.seek(4);
-  file.write((uint8_t*)&fileSize, 4);
-  
-  // Update data size in data chunk header
-  file.seek(40);
-  file.write((uint8_t*)&dataSize, 4);
+  // Optional: Print debug info periodically
+  static int debug_counter = 0;
+  if (++debug_counter % 1000 == 0) {
+    Serial.printf("Samples: mic1=%d, mic2=%d, mixed=%d, written=%d\n", 
+                  sample_count1, sample_count2, sample_count, bytes_written/sizeof(int16_t));
+  }
 }
