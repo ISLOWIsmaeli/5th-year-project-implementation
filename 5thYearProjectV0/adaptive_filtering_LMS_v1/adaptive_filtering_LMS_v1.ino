@@ -5,10 +5,10 @@
 #define PRIMARY_SCK 14
 #define PRIMARY_WS 15
 #define PRIMARY_SD 32
-#define AMP_DOUT 25
-#define SECONDARY_SCK 18
-#define SECONDARY_WS 2
-#define SECONDARY_SD 33
+#define AMP_DOUT 22
+#define SECONDARY_SCK 25 
+#define SECONDARY_WS 26
+#define SECONDARY_SD 35
 
 // ANC Parameters
 #define FILTER_TAPS 32    // Number of filter coefficients (tradeoff between performance and computation)

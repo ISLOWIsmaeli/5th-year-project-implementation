@@ -4,12 +4,12 @@
 #define PRIMARY_SCK 14
 #define PRIMARY_WS 15
 #define PRIMARY_SD 32
-#define AMP_DOUT 25
+#define AMP_DOUT 22
 
 // Secondary I2S Bus (Mic2)
-#define SECONDARY_SCK 18
-#define SECONDARY_WS 2
-#define SECONDARY_SD 33
+#define SECONDARY_SCK 26
+#define SECONDARY_WS 25
+#define SECONDARY_SD 35
 
 void setup() {
   Serial.begin(115200);
@@ -73,7 +73,7 @@ void loop() {
   // Mix samples (simple average)
   int sample_count = min(bytes_read1, bytes_read2) / sizeof(int16_t);
   for(int i = 0; i < sample_count; i++) {
-    int32_t mixed = ((mic1_samples[i] + mic2_samples[i])*6) / 2;
+    int32_t mixed = ((mic1_samples[i] + mic2_samples[i])) / 2;
     mic1_samples[i] = constrain(mixed, -32768, 32767);
   }
 
