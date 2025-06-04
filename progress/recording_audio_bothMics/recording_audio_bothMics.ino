@@ -1,6 +1,5 @@
 #include <driver/i2s.h>
 #include <SD.h>
-#include <math.h>
 
 // Primary I2S Bus (Mic1 + Amp)
 #define PRIMARY_SCK 14
@@ -27,35 +26,15 @@
 #define OUTPUT_GAIN 2.5       // Speaker output amplification (1.0-5.0)
 #define NOISE_GATE 50         // Minimum signal level to process (reduces background noise)
 
-// LMS Adaptive Filter Parameters
-#define FILTER_LENGTH 32      // Number of filter taps
-#define LMS_MU 0.001          // LMS step size (learning rate)
-#define RMS_WINDOW_SIZE 64    // Window size for RMS calculation
-#define CONVERGENCE_THRESHOLD 0.01  // RMS error threshold for convergence detection
-
 // Recording control variables
 bool isRecording = false;
 bool wasButtonPressed = false;
 File recordingFile;
-String filename = "/adaptive_filtered_recording.raw";
-
-// LMS Adaptive Filter Variables
-float filterCoeffs[FILTER_LENGTH] = {0};  // w(n) - filter coefficients
-float inputBuffer[FILTER_LENGTH] = {0};   // x(n) - reference input buffer (mic2)
-float errorBuffer[RMS_WINDOW_SIZE] = {0}; // For RMS error calculation
-int errorIndex = 0;
-bool hasConverged = false;
-unsigned long lastRMSPrint = 0;
-float lastRMSError = 0;
+String filename = "/dual_mic_recording.raw";
 
 void setup() {
   Serial.begin(115200);
-  Serial.println("Dual Microphone Recorder with LMS Adaptive Noise Cancellation");
-  Serial.println("Mic1: Primary (desired signal + noise)");
-  Serial.println("Mic2: Reference (noise source)");
-  Serial.println("Filter Length: " + String(FILTER_LENGTH) + " taps");
-  Serial.println("Learning Rate (μ): " + String(LMS_MU, 6));
-  Serial.println("========================================");
+  Serial.println("Dual Microphone Audio Recorder Starting...");
   
   // Button setup
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -135,8 +114,7 @@ void setup() {
   i2s_start(I2S_NUM_1);
   
   Serial.println("System ready!");
-  Serial.println("Press and hold button to record noise-cancelled audio, release to play");
-  Serial.println("RMS Error monitoring started...");
+  Serial.println("Press and hold button to record mixed audio, release to play");
 }
 
 void loop() {
@@ -155,8 +133,8 @@ void loop() {
   wasButtonPressed = buttonPressed;
   
   // Read audio from both microphones
-  int16_t mic1_samples[SAMPLE_BUFFER_SIZE];  // Primary (desired + noise)
-  int16_t mic2_samples[SAMPLE_BUFFER_SIZE];  // Reference (noise)
+  int16_t mic1_samples[SAMPLE_BUFFER_SIZE];
+  int16_t mic2_samples[SAMPLE_BUFFER_SIZE];
   size_t bytes_read1, bytes_read2;
   
   // Read from both I2S buses
@@ -166,114 +144,47 @@ void loop() {
     return;
   }
   
-  // Process samples with LMS adaptive filter
+  // Process and mix audio samples
   int sample_count = min(bytes_read1, bytes_read2) / sizeof(int16_t);
-  int16_t filtered_samples[SAMPLE_BUFFER_SIZE];
+  int16_t mixed_samples[SAMPLE_BUFFER_SIZE];
   
   for(int i = 0; i < sample_count; i++) {
-    // Normalize inputs to float range [-1, 1]
-    float primary_input = (float)mic1_samples[i] / 32768.0;      // d(n) - desired signal + noise
-    float reference_input = (float)mic2_samples[i] / 32768.0;    // x(n) - reference noise
+    // Apply input gain to individual microphones
+    int32_t sample1 = (int32_t)(mic1_samples[i] * MIC_GAIN);
+    int32_t sample2 = (int32_t)(mic2_samples[i] * MIC_GAIN);
     
-    // Apply LMS adaptive filtering
-    float filtered_output = applyLMSFilter(primary_input, reference_input);
+    // Clamp amplified inputs to prevent overflow before mixing
+    sample1 = constrain(sample1, -32768, 32767);
+    sample2 = constrain(sample2, -32768, 32767);
     
-    // Apply gain and convert back to int16
-    filtered_output *= OUTPUT_GAIN;
+    // Mix the amplified samples
+    int32_t mixed = (sample1 + sample2) / 2;
     
-    // Apply noise gate
-    if (abs(filtered_output * 32768) < NOISE_GATE) {
-      filtered_output = 0;
+    // Apply noise gate - ignore very quiet signals
+    if (abs(mixed) < NOISE_GATE) {
+      mixed = 0;
     }
     
-    // Convert back to int16 and clamp
-    int32_t output_sample = (int32_t)(filtered_output * 32768.0);
-    filtered_samples[i] = constrain(output_sample, -32768, 32767);
+    // Apply output gain for louder speaker output
+    mixed = (int32_t)(mixed * OUTPUT_GAIN);
+    
+    // Final clamp to prevent distortion
+    mixed_samples[i] = constrain(mixed, -32768, 32767);
   }
   
-  // If recording, save filtered audio to SD card
+  // If recording, save mixed audio to SD card
   if (isRecording && recordingFile) {
     size_t bytes_to_write = sample_count * sizeof(int16_t);
-    recordingFile.write((uint8_t*)filtered_samples, bytes_to_write);
+    recordingFile.write((uint8_t*)mixed_samples, bytes_to_write);
   }
   
-  // Always output filtered audio for live monitoring
+  // Always output mixed audio for live monitoring
   size_t bytes_written;
-  i2s_write(I2S_NUM_0, filtered_samples, sample_count * sizeof(int16_t), &bytes_written, pdMS_TO_TICKS(10));
-  
-  // Print RMS error periodically
-  unsigned long currentTime = millis();
-  if (currentTime - lastRMSPrint >= 500) {  // Print every 500ms
-    printRMSError();
-    lastRMSPrint = currentTime;
-  }
-}
-
-float applyLMSFilter(float desired, float reference) {
-  // Shift input buffer (delay line for reference signal)
-  for(int i = FILTER_LENGTH - 1; i > 0; i--) {
-    inputBuffer[i] = inputBuffer[i-1];
-  }
-  inputBuffer[0] = reference;
-  
-  // Calculate filter output y(n) = w^T(n) * x(n)
-  float filterOutput = 0.0;
-  for(int i = 0; i < FILTER_LENGTH; i++) {
-    filterOutput += filterCoeffs[i] * inputBuffer[i];
-  }
-  
-  // Calculate error e(n) = d(n) - y(n)
-  float error = desired - filterOutput;
-  
-  // Store error for RMS calculation
-  errorBuffer[errorIndex] = error;
-  errorIndex = (errorIndex + 1) % RMS_WINDOW_SIZE;
-  
-  // Update filter coefficients using LMS: w(n+1) = w(n) + μ * e(n) * x(n)
-  if (!hasConverged) {
-    for(int i = 0; i < FILTER_LENGTH; i++) {
-      filterCoeffs[i] += LMS_MU * error * inputBuffer[i];
-    }
-  }
-  
-  // Return the error as the cleaned signal (noise cancelled)
-  return error;
-}
-
-float calculateRMSError() {
-  float sumSquares = 0.0;
-  for(int i = 0; i < RMS_WINDOW_SIZE; i++) {
-    sumSquares += errorBuffer[i] * errorBuffer[i];
-  }
-  return sqrt(sumSquares / RMS_WINDOW_SIZE);
-}
-
-void printRMSError() {
-  float currentRMS = calculateRMSError();
-  
-  // Check for convergence
-  if (!hasConverged) {
-    float rmsChange = abs(currentRMS - lastRMSError);
-    if (rmsChange < CONVERGENCE_THRESHOLD && lastRMSError > 0) {
-      hasConverged = true;
-      Serial.println("🎯 FILTER CONVERGED! Noise cancellation optimized.");
-      Serial.println("=====================================");
-    }
-  }
-  
-  // Print current status
-  if (!hasConverged) {
-    Serial.printf("🔄 Adapting... RMS Error: %.6f | Change: %.6f\n", 
-                  currentRMS, abs(currentRMS - lastRMSError));
-  } else {
-    Serial.printf("✅ Converged   RMS Error: %.6f | Noise Suppression Active\n", currentRMS);
-  }
-  
-  lastRMSError = currentRMS;
+  i2s_write(I2S_NUM_0, mixed_samples, sample_count * sizeof(int16_t), &bytes_written, pdMS_TO_TICKS(10));
 }
 
 void startRecording() {
-  Serial.println("🎤 Recording started (noise-cancelled audio)...");
+  Serial.println("🎤 Recording started (dual microphones)...");
   isRecording = true;
   
   // Remove old recording if exists
@@ -298,7 +209,7 @@ void stopRecording() {
     // Show file size
     File tempFile = SD.open(filename);
     if (tempFile) {
-      Serial.printf("📁 Noise-cancelled audio file size: %d bytes\n", tempFile.size());
+      Serial.printf("📁 Mixed audio file size: %d bytes\n", tempFile.size());
       tempFile.close();
     }
   }
@@ -311,7 +222,7 @@ void playRecording() {
     return;
   }
   
-  Serial.println("🔊 Playing noise-cancelled recording...");
+  Serial.println("🔊 Playing mixed recording...");
   int16_t playBuffer[SAMPLE_BUFFER_SIZE];
   
   while (playFile.available()) {
